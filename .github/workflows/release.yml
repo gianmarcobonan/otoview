@@ -23,8 +23,9 @@ jobs:
           unzip -q ff.zip
           mkdir OtoView
           cp target/release/otoview.exe ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe OtoView/
+          cp -L target/release/DirectML.dll OtoView/   # GPU backend for AI photos
           cp ffmpeg-master-latest-win64-gpl/LICENSE.txt OtoView/FFMPEG-LICENSE.txt
-          cp README.md LICENSE-MIT LICENSE-APACHE OtoView/
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md OtoView/
           7z a OtoView-windows-x64.zip OtoView
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: OtoView-windows-x64.zip }
@@ -47,6 +48,9 @@ jobs:
           mkdir -p $APP/MacOS $APP/Resources
           lipo -create -output $APP/MacOS/otoview \
             target/x86_64-apple-darwin/release/otoview target/aarch64-apple-darwin/release/otoview
+          # ONNX Runtime (Apple Silicon only) libraries, if the prebuilt package has any.
+          shopt -s nullglob; for f in target/aarch64-apple-darwin/release/*.dylib; do cp -L "$f" $APP/MacOS/; done
+          cp THIRD-PARTY-NOTICES.md $APP/Resources/
 
           # Static FFmpeg for each architecture, merged into one universal binary.
           for arch in amd64 arm64; do
@@ -102,6 +106,9 @@ jobs:
           set -e
           mkdir -p AppDir/usr/bin
           cp target/release/otoview AppDir/usr/bin/
+          # ONNX Runtime libraries copied next to the build, if the prebuilt package has any.
+          shopt -s nullglob; for f in target/release/*.so*; do cp -L "$f" AppDir/usr/bin/; done
+          cp THIRD-PARTY-NOTICES.md AppDir/
           curl -fsSL -o ff.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
           tar -xf ff.tar.xz
           cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg AppDir/usr/bin/

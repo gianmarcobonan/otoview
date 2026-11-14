@@ -18,8 +18,14 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     ok.is_ok_and(|s| s.success()).then(|| PathBuf::from("ffmpeg"))
 }
 
+/// A frame to record: the JPEG as received, or a processed image (encoded on the writer thread).
+pub enum Frame {
+    Jpeg(Vec<u8>),
+    Image(std::sync::Arc<image::RgbImage>),
+}
+
 pub struct Recorder {
-    frames: SyncSender<Vec<u8>>,
+    frames: SyncSender<Frame>,
     writer: JoinHandle<()>,
     child: Child,
     pub path: PathBuf,
@@ -43,9 +49,17 @@ impl Recorder {
             .spawn()?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         // Bounded: if ffmpeg falls behind we drop frames instead of growing memory.
-        let (frames, rx) = sync_channel::<Vec<u8>>(30);
+        let (frames, rx) = sync_channel::<Frame>(30);
         let writer = thread::spawn(move || {
-            for jpeg in rx {
+            for frame in rx {
+                let jpeg = match frame {
+                    Frame::Jpeg(j) => j,
+                    Frame::Image(img) => {
+                        let mut j = Vec::new();
+                        let _ = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut j, 92).encode_image(&*img);
+                        j
+                    }
+                };
                 if stdin.write_all(&jpeg).is_err() {
                     return; // ffmpeg died; stop() reports its stderr
                 }
@@ -54,9 +68,9 @@ impl Recorder {
         Ok(Recorder { frames, writer, child, path })
     }
 
-    /// Queues a frame; returns false once ffmpeg is gone.
-    pub fn push(&self, jpeg: &[u8]) -> bool {
-        !matches!(self.frames.try_send(jpeg.to_vec()), Err(TrySendError::Disconnected(_)))
+    /// Queues a frame (dropped if ffmpeg is behind); returns false once ffmpeg is gone.
+    pub fn push(&self, frame: Frame) -> bool {
+        !matches!(self.frames.try_send(frame), Err(TrySendError::Disconnected(_)))
     }
 
     /// Closes the stream and lets ffmpeg finalise the MP4 in the background.
@@ -91,7 +105,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("otoview-test-{}.mp4", std::process::id()));
         let rec = Recorder::start(&ffmpeg, path.clone()).unwrap();
         for i in 0..20 {
-            assert!(rec.push(&crate::sim::fake_jpeg(i)));
+            assert!(rec.push(Frame::Jpeg(crate::sim::fake_jpeg(i))));
             thread::sleep(std::time::Duration::from_millis(40));
         }
         let out = rec.stop().join().unwrap().unwrap();

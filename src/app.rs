@@ -1,23 +1,27 @@
 //! egui front-end: live view, status, battery, LED, rotation, photos.
 
 use crate::detect::{self, Detection, Detector, MIN_SCORE};
+use crate::enhance::Enhancer;
 use crate::protocol::{Config, Device, Event, Family, Info, NetIface, candidate_ifaces, find_device_iface};
-use crate::record::{Recorder, find_ffmpeg};
-use crate::tr;
+use crate::record::{Frame as RecFrame, Recorder, find_ffmpeg};
+use crate::{tr, upscale};
 use crate::wifi::{self, is_endoscope};
 use eframe::egui::{self, Color32, ColorImage, Key, RichText, TextureHandle, TextureOptions, Vec2};
 use image::RgbImage;
+use image::codecs::jpeg::JpegEncoder;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const GREEN: Color32 = Color32::from_rgb(60, 200, 90);
 const RED: Color32 = Color32::from_rgb(230, 70, 60);
 
 enum Msg {
-    Frame { image: ColorImage, rgb: Arc<RgbImage>, jpeg: Vec<u8>, angle: f32 },
+    /// `rgb` is the frame as received; `shown` its enhanced version when enhancement is on.
+    Frame { image: ColorImage, rgb: Arc<RgbImage>, shown: Option<Arc<RgbImage>>, jpeg: Vec<u8>, angle: f32 },
     Event(Event),
 }
 
@@ -347,6 +351,11 @@ pub struct App {
     rx: Receiver<Msg>,
     tex: Option<TextureHandle>,
     jpeg: Vec<u8>,
+    /// Current frame as received, and its enhanced version while enhancement is on.
+    rgb: Option<Arc<RgbImage>>,
+    shown: Option<Arc<RgbImage>>,
+    photo_ai: PhotoAi,
+    enhance: Arc<AtomicBool>,
     angle: f32,
     info: Option<(Family, Info)>,
     battery: Option<u8>,
@@ -365,26 +374,42 @@ pub struct App {
     ai: Ai,
 }
 
-/// Decodes JPEGs off the UI thread and wakes the UI.
-fn spawn_decoder(ctx: egui::Context, events: Receiver<Event>, out: Sender<Msg>) {
+/// Decodes (and, when `enhance` is set, enhances) frames off the UI thread and wakes the UI.
+fn spawn_decoder(ctx: egui::Context, events: Receiver<Event>, out: Sender<Msg>, enhance: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        for ev in events {
-            let msg = match ev {
-                Event::Frame { jpeg, angle } => {
-                    match image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg) {
-                        Ok(img) => {
-                            let rgb = img.to_rgb8();
-                            let size = [rgb.width() as usize, rgb.height() as usize];
-                            let image = ColorImage::from_rgb(size, rgb.as_raw());
-                            Msg::Frame { image, rgb: Arc::new(rgb), jpeg, angle }
+        let mut enhancer = Enhancer::default();
+        let mut was_on = false;
+        while let Ok(first) = events.recv() {
+            // If processing fell behind, only the newest frame is worth showing.
+            let mut batch: Vec<Event> = std::iter::once(first).chain(events.try_iter()).collect();
+            let newest = batch.iter().rposition(|e| matches!(e, Event::Frame { .. }));
+            let mut i = 0;
+            batch.retain(|e| {
+                i += 1;
+                !matches!(e, Event::Frame { .. }) || Some(i - 1) == newest
+            });
+            for ev in batch {
+                let msg = match ev {
+                    Event::Frame { jpeg, angle } => {
+                        let Ok(img) = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg) else {
+                            continue; // corrupt frame (lost fragment): skip
+                        };
+                        let rgb = img.to_rgb8();
+                        let on = enhance.load(Ordering::Relaxed);
+                        if on && !was_on {
+                            enhancer.reset();
                         }
-                        Err(_) => continue, // corrupt frame (lost fragment): skip
+                        was_on = on;
+                        let shown = on.then(|| Arc::new(enhancer.process(&rgb)));
+                        let view = shown.as_deref().unwrap_or(&rgb);
+                        let image = ColorImage::from_rgb([view.width() as usize, view.height() as usize], view.as_raw());
+                        Msg::Frame { image, rgb: Arc::new(rgb), shown, jpeg, angle }
                     }
+                    other => Msg::Event(other),
+                };
+                if out.send(msg).is_err() {
+                    return;
                 }
-                other => Msg::Event(other),
-            };
-            if out.send(msg).is_err() {
-                return;
             }
             ctx.request_repaint();
         }
@@ -402,17 +427,77 @@ fn open_in_file_manager(path: &PathBuf) {
     let _ = std::process::Command::new(cmd).arg(path).spawn();
 }
 
+fn save_jpeg(path: &std::path::Path, img: &RgbImage) -> std::io::Result<()> {
+    let file = std::fs::File::create(path)?;
+    JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95).encode_image(img).map_err(std::io::Error::other)
+}
+
+/// AI super-resolution of photos ("-ai.jpg" next to the original), one at a time on a
+/// worker thread that loads the network on first use.
+struct PhotoAi {
+    enabled: bool,
+    ctx: egui::Context,
+    jobs: Option<Sender<(Arc<RgbImage>, PathBuf)>>,
+    results: (Sender<String>, Receiver<String>),
+    pending: usize,
+}
+
+impl PhotoAi {
+    fn new(ctx: egui::Context) -> PhotoAi {
+        PhotoAi { enabled: false, ctx, jobs: None, results: channel(), pending: 0 }
+    }
+
+    fn submit(&mut self, img: Arc<RgbImage>, path: PathBuf) {
+        let jobs = self.jobs.get_or_insert_with(|| {
+            let (tx, rx) = channel::<(Arc<RgbImage>, PathBuf)>();
+            let (done, ctx) = (self.results.0.clone(), self.ctx.clone());
+            std::thread::spawn(move || {
+                let mut up = upscale::Upscaler::new();
+                for (img, path) in rx {
+                    let t = Instant::now();
+                    let res = up.as_mut().map_err(|e| e.clone()).and_then(|u| {
+                        let out = u.run(&img)?;
+                        save_jpeg(&path, &out).map_err(|e| e.to_string())?;
+                        Ok(u.device)
+                    });
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let _ = done.send(match res {
+                        Ok(dev) => format!("{} {name} ({dev}, {:.1} s)", tr("Foto AI salvata:", "AI photo saved:"), t.elapsed().as_secs_f32()),
+                        Err(e) => format!("{} {e}", tr("Errore AI:", "AI error:")),
+                    });
+                    ctx.request_repaint();
+                }
+            });
+            tx
+        });
+        if jobs.send((img, path)).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    fn poll(&mut self) -> Option<String> {
+        let msg = self.results.1.try_recv().ok()?;
+        self.pending = self.pending.saturating_sub(1);
+        Some(msg)
+    }
+}
+
 impl App {
     pub fn new(ctx: egui::Context, cfg: Config) -> Self {
         let (events_tx, events) = channel();
         let (tx, rx) = channel();
-        spawn_decoder(ctx, events, tx);
+        let enhance = Arc::new(AtomicBool::new(false));
+        spawn_decoder(ctx.clone(), events, tx, enhance.clone());
         App {
             net: Net::new(cfg, events_tx),
             wifi: Wifi::new(),
             rx,
             tex: None,
             jpeg: Vec::new(),
+            rgb: None,
+            shown: None,
+            photo_ai: PhotoAi::new(ctx.clone()),
+            enhance,
             angle: 0.0,
             info: None,
             battery: None,
@@ -465,14 +550,22 @@ impl App {
     fn drain(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Frame { image, rgb, jpeg, angle } => {
+                Msg::Frame { image, rgb, shown, jpeg, angle } => {
                     self.frames += 1;
-                    self.ai.feed(&rgb);
-                    let rec_died = self.recorder.as_ref().is_some_and(|(r, _)| !r.push(&jpeg));
+                    self.ai.feed(&rgb); // the detector was trained on raw frames
+                    // Videos record what is on screen.
+                    let rec_died = self.recorder.as_ref().is_some_and(|(r, _)| {
+                        !r.push(match &shown {
+                            Some(img) => RecFrame::Image(img.clone()),
+                            None => RecFrame::Jpeg(jpeg.clone()),
+                        })
+                    });
                     if rec_died {
                         self.toggle_recording(); // ffmpeg exited: stop() reports why
                     }
                     self.jpeg = jpeg;
+                    self.rgb = Some(rgb);
+                    self.shown = shown;
                     self.angle = angle;
                     match &mut self.tex {
                         Some(t) => t.set(image, TextureOptions::LINEAR),
@@ -505,10 +598,24 @@ impl App {
         }
         let dir = photos_dir();
         let name = chrono::Local::now().format("IMG_%Y%m%d_%H%M%S_%3f.jpg").to_string();
-        // ponytail: saves the frame as received (unrotated, no re-encode).
-        let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&name), &self.jpeg));
+        // ponytail: saves the frame as received (unrotated, no re-encode), plus "-hd" when enhanced.
+        let result = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&name), &self.jpeg)).and_then(|_| {
+            let Some(hd) = &self.shown else { return Ok(()) };
+            save_jpeg(&dir.join(name.replace(".jpg", "-hd.jpg")), hd)
+        });
         let text = match result {
-            Ok(()) => format!("{} {name}", tr("Foto salvata:", "Photo saved:")),
+            Ok(()) => {
+                let mut text = format!("{} {name}", tr("Foto salvata:", "Photo saved:"));
+                if self.shown.is_some() {
+                    text += " + HD";
+                }
+                // The AI works on the best version available: enhanced if on, else the raw frame.
+                if let Some(src) = self.photo_ai.enabled.then(|| self.shown.clone().or_else(|| self.rgb.clone())).flatten() {
+                    self.photo_ai.submit(src, dir.join(name.replace(".jpg", "-ai.jpg")));
+                    text += tr(" (AI in corso…)", " (AI working…)");
+                }
+                text
+            }
             Err(e) => format!("{} {e}", tr("Errore salvataggio foto:", "Cannot save photo:")),
         };
         self.toast = Some((text, Instant::now()));
@@ -604,6 +711,27 @@ impl App {
             ui.checkbox(&mut self.invert, tr("Inverti verso", "Reverse direction"));
             if ui.button(tr("Ruota 90°", "Rotate 90°")).clicked() {
                 self.quarter_turns = (self.quarter_turns + 1) % 4;
+            }
+            ui.separator();
+            let mut on = self.enhance.load(Ordering::Relaxed);
+            ui.selectable_value(&mut on, false, tr("Originale", "Original"));
+            ui.selectable_value(&mut on, true, tr("Migliora (E)", "Enhance (E)")).on_hover_text(tr(
+                "Fonde più fotogrammi allineandoli al movimento: meno rumore e quadretti JPEG, più dettaglio. \
+                 Non inventa nulla. Le foto salvano anche l'originale.",
+                "Merges several frames aligned to the motion: less noise and JPEG blockiness, more detail. \
+                 Nothing is invented. Photos also keep the original.",
+            ));
+            self.enhance.store(on, Ordering::Relaxed);
+            ui.checkbox(&mut self.photo_ai.enabled, tr("Foto AI", "AI photos")).on_hover_text(tr(
+                "Ogni foto salva anche una copia \"-ai\" ingrandita 2× da una rete neurale (Real-ESRGAN), \
+                 in 1-3 secondi. L'AI inventa dettagli plausibili che possono non esistere: \
+                 l'originale resta sempre accanto. Non usare per diagnosi.",
+                "Each photo also saves an \"-ai\" copy enlarged 2× by a neural network (Real-ESRGAN), \
+                 in 1-3 seconds. The AI invents plausible details that may not exist: \
+                 the original is always kept next to it. Not for diagnosis.",
+            ));
+            if self.photo_ai.pending > 0 {
+                ui.spinner();
             }
             ui.separator();
             if self.ai.loading {
@@ -723,7 +851,7 @@ impl eframe::App for App {
         self.drain(&ctx);
         self.poll_finished();
         self.wifi.tick(&ctx, self.connected);
-        if let Some(msg) = self.ai.poll(&ctx).or_else(|| self.net.tick()) {
+        if let Some(msg) = self.ai.poll(&ctx).or_else(|| self.photo_ai.poll()).or_else(|| self.net.tick()) {
             self.toast = Some((msg, Instant::now()));
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
@@ -732,6 +860,9 @@ impl eframe::App for App {
         }
         if ctx.input(|i| i.key_pressed(Key::Space)) {
             self.take_photo();
+        }
+        if ctx.input(|i| i.key_pressed(Key::E)) {
+            self.enhance.fetch_xor(true, Ordering::Relaxed);
         }
         if ctx.input(|i| i.key_pressed(Key::R)) && self.ffmpeg.is_some() && (self.recorder.is_some() || !self.jpeg.is_empty()) {
             self.toggle_recording();

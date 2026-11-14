@@ -16,8 +16,20 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 eframe = "0.37.0"
 if-addrs = "0.15.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+rayon = "1.12.0"
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
 sys-locale = "0.3.2"
 tract-tflite = "0.23.10"
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+
+# ONNX Runtime for AI super-resolution, with each system's GPU backend. Prebuilt
+# binaries exist for these targets only; elsewhere (e.g. Intel Macs) AI mode is unavailable.
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-31", "directml"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-31", "webgpu"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-31", "coreml"] }

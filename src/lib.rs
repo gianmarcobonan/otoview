@@ -1,8 +1,10 @@
 pub mod app;
 pub mod detect;
+pub mod enhance;
 pub mod protocol;
 pub mod record;
 pub mod sim;
+pub mod upscale;
 pub mod wifi;
 
 use std::sync::OnceLock;

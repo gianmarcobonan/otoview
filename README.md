@@ -47,6 +47,8 @@ and **no account, no cloud, no telemetry**. It is a single native program; nothi
 - 📶 **One-click connection**: finds the endoscope's Wi-Fi (`softish-xxxx`), joins it, and takes you back to your own Wi-Fi when you are done
 - 🎥 **Live video** from both known firmware families, with automatic reassembly of the UDP stream
 - 📷 **Photos** (<kbd>Space</kbd>) and 🎬 **MP4 video** (<kbd>R</kbd>, H.264 via FFmpeg)
+- ✨ **Live image enhancement** (<kbd>E</kbd>): merges consecutive frames aligned to your hand's motion, for less noise and JPEG blockiness and more real detail; nothing is invented
+- 🖼️ **AI photos** (optional): each photo can also get an `-ai` copy enlarged 2× by [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) on your GPU; see [below](#ai-photos)
 - 💡 **Light control** and 🔋 **battery level** (including charging)
 - 🔄 **Auto-rotation** from the device's G-sensor, plus manual 90° rotation
 - 🧠 **Eardrum detection (AI)**, running locally in pure Rust ([tract](https://github.com/sonos/tract)); opt-in, see [below](#ai-eardrum-detection)
@@ -110,6 +112,18 @@ OtoView extracts the model, checks it, and keeps a copy for next time
 (`%APPDATA%\otoview` on Windows, `~/Library/Application Support/otoview` on macOS, `~/.local/share/otoview` on Linux).
 Everything runs on your computer (about 70 ms per frame on a laptop CPU); no image ever leaves it.
 
+## AI photos
+
+Tick **AI photos** and every photo also saves an `-ai.jpg` copy, enlarged 2× by the Real-ESRGAN network.
+It runs in the background on your graphics card (DirectML on Windows, CoreML on Apple Silicon, Vulkan on Linux),
+or on the CPU otherwise: about 1–2 s per photo on integrated graphics. Not available on Intel Macs.
+
+> [!WARNING]
+> Super-resolution networks **invent plausible detail**: in tests it rewrote letters it could not read.
+> The `-ai` copy is for viewing only; the original photo is always saved next to it.
+
+For the live view, use **Enhance** (<kbd>E</kbd>) instead: it only combines what the camera really captured.
+
 ## Build from source
 
 You need [Rust](https://rustup.rs) 1.95 or newer.
@@ -127,6 +141,7 @@ cargo run --release -- --sim text   # or --sim tx
 cargo test
 ```
 
+The first build downloads a prebuilt ONNX Runtime (for AI photos) through the `ort` crate.
 Video recording needs `ffmpeg` next to the executable or on your `PATH`.
 On Linux, egui needs the usual X11/Wayland development packages
 (on Debian/Ubuntu: `libxkbcommon-dev libgl1-mesa-dev libwayland-dev`).
@@ -143,6 +158,8 @@ The full protocol, written up from a static analysis of the Android app for inte
 | [`src/wifi.rs`](src/wifi.rs) | Joining the endoscope Wi-Fi and back (netsh / networksetup / nmcli) |
 | [`src/app.rs`](src/app.rs) | User interface ([egui](https://github.com/emilk/egui)) |
 | [`src/record.rs`](src/record.rs) | MP4 recording through FFmpeg |
+| [`src/enhance.rs`](src/enhance.rs) | Live enhancement: frame alignment, motion-aware fusion, detail sharpening |
+| [`src/upscale.rs`](src/upscale.rs) | AI photos: Real-ESRGAN through ONNX Runtime on the GPU |
 | [`src/detect.rs`](src/detect.rs) | Eardrum detector: SSD-MobileNet with tract, plus box decoding and NMS |
 | [`src/sim.rs`](src/sim.rs) | Device simulator used by the tests |
 
@@ -154,7 +171,8 @@ Please run `cargo test` and `cargo clippy` before opening a pull request.
 ## License
 
 OtoView is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-The release packages also contain an unmodified [FFmpeg](https://ffmpeg.org) build, distributed under its own license (GPL).
+The release packages also contain an unmodified [FFmpeg](https://ffmpeg.org) build, distributed under its own license (GPL),
+the Real-ESRGAN model (BSD-3-Clause) and ONNX Runtime (MIT): see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Disclaimer
 

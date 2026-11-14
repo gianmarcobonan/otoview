@@ -47,6 +47,8 @@ e **niente account, niente cloud, nessun dato inviato**. È un unico programma n
 - 📶 **Collegamento con un clic**: trova il Wi-Fi dell'endoscopio (`softish-xxxx`), ci si collega e alla fine ti riporta sul tuo Wi-Fi
 - 🎥 **Video in diretta** da entrambe le famiglie di firmware conosciute
 - 📷 **Foto** (<kbd>Spazio</kbd>) e 🎬 **video MP4** (<kbd>R</kbd>, H.264 tramite FFmpeg)
+- ✨ **Miglioramento dell'immagine dal vivo** (<kbd>E</kbd>): fonde fotogrammi consecutivi allineandoli al movimento della mano, per meno rumore e quadretti JPEG e più dettaglio reale; non inventa nulla
+- 🖼️ **Foto AI** (facoltative): ogni foto può avere anche una copia `-ai` ingrandita 2× da [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) sulla scheda grafica; vedi [sotto](#foto-ai)
 - 💡 **Regolazione della luce** e 🔋 **livello batteria** (anche in carica)
 - 🔄 **Rotazione automatica** con il sensore di inclinazione del dispositivo, più rotazione manuale di 90°
 - 🧠 **Riconoscimento del timpano (AI)**, eseguito sul computer in Rust puro ([tract](https://github.com/sonos/tract)); facoltativo, vedi [sotto](#riconoscimento-del-timpano-ai)
@@ -110,6 +112,18 @@ OtoView estrae il modello, lo verifica e ne conserva una copia
 (`%APPDATA%\otoview` su Windows, `~/Library/Application Support/otoview` su macOS, `~/.local/share/otoview` su Linux).
 Tutto gira sul tuo computer (circa 70 ms per fotogramma sulla CPU di un portatile): nessuna immagine esce dal PC.
 
+## Foto AI
+
+Spunta **Foto AI** e ogni foto salva anche una copia `-ai.jpg`, ingrandita 2× dalla rete Real-ESRGAN.
+Lavora in sottofondo sulla scheda grafica (DirectML su Windows, CoreML su Apple Silicon, Vulkan su Linux),
+altrimenti sul processore: circa 1–2 s per foto con una grafica integrata. Non disponibile sui Mac Intel.
+
+> [!WARNING]
+> Le reti di super-risoluzione **inventano dettagli plausibili**: nelle prove ha riscritto lettere che non riusciva a leggere.
+> La copia `-ai` serve solo per guardare; la foto originale viene sempre salvata accanto.
+
+Per il video dal vivo usa invece **Migliora** (<kbd>E</kbd>): combina solo ciò che la telecamera ha davvero ripreso.
+
 ## Compilare dai sorgenti
 
 Serve [Rust](https://rustup.rs) 1.95 o più recente.
@@ -127,6 +141,7 @@ cargo run --release -- --sim text   # oppure --sim tx
 cargo test
 ```
 
+La prima compilazione scarica una build già pronta di ONNX Runtime (per le foto AI) tramite il crate `ort`.
 Per registrare video serve `ffmpeg` accanto all'eseguibile o nel `PATH`.
 Su Linux egui richiede i soliti pacchetti di sviluppo X11/Wayland
 (su Debian/Ubuntu: `libxkbcommon-dev libgl1-mesa-dev libwayland-dev`).
@@ -143,6 +158,8 @@ Il protocollo completo, ricostruito per interoperabilità con un'analisi statica
 | [`src/wifi.rs`](src/wifi.rs) | Passaggio al Wi-Fi dell'endoscopio e ritorno (netsh / networksetup / nmcli) |
 | [`src/app.rs`](src/app.rs) | Interfaccia grafica ([egui](https://github.com/emilk/egui)) |
 | [`src/record.rs`](src/record.rs) | Registrazione MP4 tramite FFmpeg |
+| [`src/enhance.rs`](src/enhance.rs) | Miglioramento dal vivo: allineamento dei fotogrammi, fusione che tiene conto del movimento, nitidezza |
+| [`src/upscale.rs`](src/upscale.rs) | Foto AI: Real-ESRGAN con ONNX Runtime sulla scheda grafica |
 | [`src/detect.rs`](src/detect.rs) | Riconoscimento del timpano: SSD-MobileNet con tract, più decodifica dei riquadri e NMS |
 | [`src/sim.rs`](src/sim.rs) | Simulatore del dispositivo usato dai test |
 
@@ -154,7 +171,8 @@ Prima di aprire una pull request esegui `cargo test` e `cargo clippy`.
 ## Licenza
 
 OtoView è distribuito con doppia licenza [MIT](LICENSE-MIT) o [Apache-2.0](LICENSE-APACHE), a tua scelta.
-I pacchetti di rilascio contengono anche una build non modificata di [FFmpeg](https://ffmpeg.org), distribuita con la sua licenza (GPL).
+I pacchetti di rilascio contengono anche una build non modificata di [FFmpeg](https://ffmpeg.org), distribuita con la sua licenza (GPL),
+il modello Real-ESRGAN (BSD-3-Clause) e ONNX Runtime (MIT): vedi [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Avvertenze
 
