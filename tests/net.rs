@@ -6,6 +6,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 #[test]
+// Only Windows refuses to route a socket bound to a LAN address to 127.0.0.1; elsewhere every
+// local interface reaches the loopback simulator, so the test has nothing to tell apart.
+#[cfg_attr(not(windows), ignore = "needs Windows routing")]
 fn finder_picks_the_interface_where_the_device_answers() {
     let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
     std::thread::spawn(move || sim::run(Family::Tx, lo).unwrap());

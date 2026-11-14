@@ -32,7 +32,9 @@ impl Recorder {
             // Timestamps from arrival time: the device frame rate is not constant.
             .args(["-use_wallclock_as_timestamps", "1", "-f", "mjpeg", "-i", "pipe:0"])
             .args(["-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency", "-crf", "18"])
-            .args(["-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-fps_mode", "vfr"])
+            // ponytail: no -fps_mode (FFmpeg 5.1+ only) and no -vsync (gone in newer builds): MP4 output is
+            // constant-rate, frames are repeated or dropped to keep the wall-clock timing.
+            .args(["-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
             .args(["-movflags", "+faststart"])
             .arg(&path)
             .stdin(Stdio::piped())
