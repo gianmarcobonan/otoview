@@ -91,15 +91,15 @@ jobs:
         with: { name: macos, path: OtoView-macos-universal.zip }
 
   linux:
-    # Oldest supported runner, so the AppImage runs on older glibc too.
-    runs-on: ubuntu-22.04
+    # The prebuilt ONNX Runtime needs glibc 2.38+: the AppImage targets Ubuntu 24.04 and newer.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libwayland-dev \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libfuse2
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libfuse2t64
       - run: cargo build --release
       - name: Package
         run: |
@@ -114,7 +114,9 @@ jobs:
           cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg AppDir/usr/bin/
           cp ffmpeg-master-latest-linux64-gpl/LICENSE.txt AppDir/FFMPEG-LICENSE.txt
           cp assets/logo-512.png AppDir/otoview.png
-          ln -s usr/bin/otoview AppDir/AppRun
+          # Launcher: lets the program find the ONNX Runtime / WebGPU libraries copied next to it.
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexport LD_LIBRARY_PATH="$HERE/usr/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\nexec "$HERE/usr/bin/otoview" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
           printf '[Desktop Entry]\nType=Application\nName=OtoView\nComment=Wi-Fi ear endoscope viewer\nExec=otoview\nIcon=otoview\nCategories=AudioVideo;Video;\n' > AppDir/otoview.desktop
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool

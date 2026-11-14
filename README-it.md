@@ -64,7 +64,7 @@ Scarica l'ultima versione dalla [pagina Releases](https://github.com/gianmarcobo
 |---|---|---|
 | Windows 10/11 (x64) | `OtoView-windows-x64.zip` | Estrai e avvia `otoview.exe` |
 | macOS 11+ (Intel e Apple Silicon) | `OtoView-macos-universal.zip` | Estrai e apri `OtoView.app` |
-| Linux (x86_64) | `OtoView-linux-x86_64.AppImage` | `chmod +x` e avvia |
+| Linux (x86_64), Ubuntu 24.04+ o equivalente (glibc 2.38+) | `OtoView-linux-x86_64.AppImage` | `chmod +x` e avvia |
 
 Ogni pacchetto è **portable** e contiene già FFmpeg per registrare i video.
 
